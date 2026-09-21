@@ -1,0 +1,2364 @@
+openapi: 3.0.3
+info:
+  title: 微信第三方平台管理平台 API
+  description: |
+    管理微信开放平台第三方平台（服务商）名下的数十个小程序：授权管理、代码模板库、
+    批量上传代码（commit）、批量提审、批量发布，以及作业编排、审核/发布台账与全量调用日志。
+
+    本文件是前后端对齐的唯一依据。Go 端由 oapi-codegen 生成 server/internal/gen/api.gen.go，
+    TS 端由 openapi-typescript 生成 web/src/api/schema.d.ts，禁止手改生成文件。
+
+    鉴权：除 POST /auth/login 外，全部接口需携带 `Authorization: Bearer <JWT>`。
+
+    微信回调（/callback/component、/callback/message/{appid}）不在本契约内：它们收发 XML、
+    成功时需返回纯文本 success，与 JSON 契约不兼容，故在 router 中单独注册。
+  version: 1.0.0
+servers:
+  - url: http://localhost:8091/api/v1
+tags:
+  - name: auth
+    description: 平台登录与身份
+  - name: platform
+    description: 第三方平台状态与运行参数
+  - name: authorizers
+    description: 已授权小程序（授权链路、信息同步、ext 变量与选项）
+  - name: templates
+    description: 代码草稿箱与模板库
+  - name: preflight
+    description: 批量操作前置体检
+  - name: jobs
+    description: 批量作业与逐项执行明细
+  - name: audits
+    description: 代码审核状态、撤回、加急与额度
+  - name: releases
+    description: 发布、灰度、回退与版本信息
+  - name: apps
+    description: 单个小程序的域名、页面、服务状态与基础库
+  - name: logs
+    description: 微信调用日志、回调事件与平台操作日志
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: 管理员登录（签发 JWT）
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/me:
+    get:
+      tags: [auth]
+      operationId: getCurrentUser
+      summary: 当前登录用户
+      responses:
+        '200':
+          description: 当前用户
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /platform/status:
+    get:
+      tags: [platform]
+      operationId: getPlatformStatus
+      summary: 平台状态总览（票据新鲜度、令牌有效期、额度、授权与作业统计）
+      responses:
+        '200':
+          description: 状态
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /platform/push-ticket:
+    post:
+      tags: [platform]
+      operationId: ensurePushTicket
+      summary: 调用 api_start_push_ticket 恢复票据推送（长时间收不到 component_verify_ticket 时的官方处置手段）
+      description: |
+        微信会向「授权事件接收 URL」每 10 分钟推送一次 component_verify_ticket（有效期 12 小时）。
+        若推送中断（票据超 20 分钟未更新、或 61005/61006 报错），可调用本接口让微信恢复推送；
+        恢复后仍需等待下一次推送到达，本接口不返回票据本身。
+      responses:
+        '204':
+          description: 已请求恢复推送（请稍后在概览页确认票据新鲜度）
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /platform/settings:
+    get:
+      tags: [platform]
+      operationId: getSettings
+      summary: 运行参数（非密钥）
+      responses:
+        '200':
+          description: 参数
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Settings' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      tags: [platform]
+      operationId: updateSettings
+      summary: 更新运行参数
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SettingsUpdateRequest' }
+      responses:
+        '200':
+          description: 更新后的参数
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Settings' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /authorizers:
+    get:
+      tags: [authorizers]
+      operationId: listAuthorizers
+      summary: 小程序列表（分页 + 筛选）
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: keyword
+          in: query
+          description: 模糊匹配昵称 / appid / 备注 / 主体名称
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/AuthorizationStatus' }
+        - name: groupName
+          in: query
+          schema: { type: string }
+        - name: tag
+          in: query
+          schema: { type: string }
+        - name: hasDevPermission
+          in: query
+          description: 是否已授权开发权限集（权限集 18）
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthorizerListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /authorizers/sync:
+    post:
+      tags: [authorizers]
+      operationId: syncAuthorizers
+      summary: 从微信侧同步授权方清单与信息（全量或指定）
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AppidSelection' }
+      responses:
+        '200':
+          description: 同步结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyncSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /authorizers/resync-tokens:
+    post:
+      tags: [authorizers]
+      operationId: resyncAuthorizerTokens
+      summary: 从 api_get_authorizer_list 重新拉取全部 authorizer_refresh_token（refresh_token 丢失/失效时的官方恢复路径）
+      responses:
+        '200':
+          description: 恢复结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyncSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /authorizers/authorization-url:
+    get:
+      tags: [authorizers]
+      operationId: getAuthorizationUrl
+      summary: 生成预授权码与授权链接（PC / 移动端 / 二维码内容）
+      parameters:
+        - name: authType
+          in: query
+          description: 授权类型，默认 2（仅小程序）
+          schema: { $ref: '#/components/schemas/AuthType' }
+        - name: bizAppid
+          in: query
+          description: 指定唯一授权小程序 appid（优先级高于 authType）
+          schema: { type: string }
+        - name: redirectUri
+          in: query
+          description: 授权回调地址，需与后台「授权发起页域名」一致
+          schema: { type: string }
+        - name: categoryIdList
+          in: query
+          description: 指定权限集 id 列表（逗号分隔），不传则用已发布权限集
+          schema: { type: string }
+      responses:
+        '200':
+          description: 授权链接
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthorizationUrlResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /authorizers/authorize:
+    post:
+      tags: [authorizers]
+      operationId: completeAuthorize
+      summary: 用授权回调携带的 auth_code 换取令牌并登记小程序（供授权回调页调用）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuthorizeRequest' }
+      responses:
+        '200':
+          description: 授权结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthorizeResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /authorizers/{appid}:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    get:
+      tags: [authorizers]
+      operationId: getAuthorizer
+      summary: 小程序详情（含权限集、类目与域名快照）
+      responses:
+        '200':
+          description: 详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthorizerDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [authorizers]
+      operationId: updateAuthorizer
+      summary: 编辑备注 / 分组 / 标签 / 启停 / ext 变量 / 提审配置
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuthorizerUpdateRequest' }
+      responses:
+        '200':
+          description: 更新后的详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthorizerDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [authorizers]
+      operationId: deleteAuthorizer
+      summary: 删除未授权的小程序记录
+      responses:
+        '204': { description: 已删除 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /authorizers/{appid}/sync:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    post:
+      tags: [authorizers]
+      operationId: syncAuthorizer
+      summary: 同步单个小程序信息
+      responses:
+        '200':
+          description: 详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthorizerDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /authorizers/{appid}/option:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    get:
+      tags: [authorizers]
+      operationId: getAuthorizerOption
+      summary: 读取授权方选项
+      parameters:
+        - name: optionName
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/AuthorizerOptionName' }
+      responses:
+        '200':
+          description: 选项值
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthorizerOption' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+    put:
+      tags: [authorizers]
+      operationId: setAuthorizerOption
+      summary: 设置授权方选项
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuthorizerOptionUpdateRequest' }
+      responses:
+        '200':
+          description: 选项值
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthorizerOption' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /drafts:
+    get:
+      tags: [templates]
+      operationId: listDrafts
+      summary: 代码草稿箱列表（component_access_token）
+      responses:
+        '200':
+          description: 草稿列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DraftListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /drafts/sync:
+    post:
+      tags: [templates]
+      operationId: syncDrafts
+      summary: 从微信侧同步草稿箱
+      responses:
+        '200':
+          description: 同步结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyncSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /drafts/{draftId}/add-to-template:
+    parameters:
+      - name: draftId
+        in: path
+        required: true
+        schema: { type: integer, format: int64 }
+    post:
+      tags: [templates]
+      operationId: addDraftToTemplate
+      summary: 将草稿添加到模板库（上限 200，超限报 85065）
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddToTemplateRequest' }
+      responses:
+        '200':
+          description: 同步后的模板列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /templates:
+    get:
+      tags: [templates]
+      operationId: listTemplates
+      summary: 代码模板库列表（component_access_token）
+      parameters:
+        - name: templateType
+          in: query
+          description: 0=普通模板（唯一可用），1=标准模板（官方已下架）
+          schema: { type: integer, enum: [0, 1] }
+      responses:
+        '200':
+          description: 模板列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /templates/sync:
+    post:
+      tags: [templates]
+      operationId: syncTemplates
+      summary: 从微信侧同步模板库
+      responses:
+        '200':
+          description: 同步结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyncSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /templates/{templateId}:
+    parameters:
+      - name: templateId
+        in: path
+        required: true
+        schema: { type: integer, format: int64 }
+    patch:
+      tags: [templates]
+      operationId: updateTemplate
+      summary: 标记默认模板 / 备注
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TemplateUpdateRequest' }
+      responses:
+        '200':
+          description: 更新后的模板
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CodeTemplate' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [templates]
+      operationId: deleteTemplate
+      summary: 删除代码模板
+      responses:
+        '204': { description: 已删除 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /preflight:
+    post:
+      tags: [preflight]
+      operationId: runPreflight
+      summary: 对目标小程序逐项体检（授权/权限集/类目/隐私指引/域名/额度/模板库余量）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PreflightRequest' }
+      responses:
+        '200':
+          description: 体检结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PreflightResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /jobs/preview:
+    post:
+      tags: [jobs]
+      operationId: previewJob
+      summary: 预览批量作业的逐项最终请求体（dry-run，不调用微信）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JobCreateRequest' }
+      responses:
+        '200':
+          description: 逐项预览
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobPreviewResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /jobs:
+    get:
+      tags: [jobs]
+      operationId: listJobs
+      summary: 作业列表
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: type
+          in: query
+          schema: { $ref: '#/components/schemas/JobType' }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/JobStatus' }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [jobs]
+      operationId: createJob
+      summary: 创建批量作业
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JobCreateRequest' }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /jobs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [jobs]
+      operationId: getJob
+      summary: 作业详情（含进度统计）
+      responses:
+        '200':
+          description: 作业
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /jobs/{id}/items:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [jobs]
+      operationId: listJobItems
+      summary: 作业逐项执行明细
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/JobItemStatus' }
+        - name: appid
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: 分页明细
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobItemListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /jobs/{id}/start:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    post:
+      tags: [jobs]
+      operationId: startJob
+      summary: 启动作业
+      responses:
+        '200':
+          description: 作业
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /jobs/{id}/pause:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    post:
+      tags: [jobs]
+      operationId: pauseJob
+      summary: 暂停作业
+      responses:
+        '200':
+          description: 作业
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /jobs/{id}/resume:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    post:
+      tags: [jobs]
+      operationId: resumeJob
+      summary: 恢复作业
+      responses:
+        '200':
+          description: 作业
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /jobs/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    post:
+      tags: [jobs]
+      operationId: cancelJob
+      summary: 取消作业（未开始项标记取消）
+      responses:
+        '200':
+          description: 作业
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /jobs/{id}/retry-failed:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    post:
+      tags: [jobs]
+      operationId: retryFailedJobItems
+      summary: 重试失败项（永久失败类不会被重试）
+      responses:
+        '200':
+          description: 作业
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /audits:
+    get:
+      tags: [audits]
+      operationId: listAudits
+      summary: 审核单列表
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: appid
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/AuditStatus' }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /audits/sync:
+    post:
+      tags: [audits]
+      operationId: syncAudits
+      summary: 向微信侧核对审核状态（事件推送的兜底对账）
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AppidSelection' }
+      responses:
+        '200':
+          description: 同步结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyncSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /audits/{appid}/history:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    get:
+      tags: [audits]
+      operationId: listAuditHistory
+      summary: 单个小程序的审核历史
+      responses:
+        '200':
+          description: 审核记录
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuditRecord' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /audits/{appid}/undo:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    post:
+      tags: [audits]
+      operationId: undoAudit
+      summary: 撤回审核（每账号每天 ≤5 次、每月 ≤10 次，超限 87013）
+      responses:
+        '200':
+          description: 撤回结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditActionResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /audits/{appid}/speed-up:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    post:
+      tags: [audits]
+      operationId: speedUpAudit
+      summary: 加急审核（需已提审且在待审核队列）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SpeedUpRequest' }
+      responses:
+        '200':
+          description: 加急结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditActionResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /audits/{appid}/quota:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    get:
+      tags: [audits]
+      operationId: getAuditQuota
+      summary: 查询服务商提审与加急额度（旗下小程序共用）
+      responses:
+        '200':
+          description: 额度
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditQuota' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /releases:
+    get:
+      tags: [releases]
+      operationId: listReleases
+      summary: 发布台账
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: appid
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReleaseListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /releases/{appid}/version:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    get:
+      tags: [releases]
+      operationId: getVersionInfo
+      summary: 体验版与线上版信息
+      responses:
+        '200':
+          description: 版本信息
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /releases/{appid}/release:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    post:
+      tags: [releases]
+      operationId: releaseApp
+      summary: 发布最后一个审核通过的版本（全量，立即生效）
+      responses:
+        '200':
+          description: 发布结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditActionResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /releases/{appid}/gray:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    post:
+      tags: [releases]
+      operationId: grayReleaseApp
+      summary: 分阶段发布（灰度比例只能递增）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GrayReleaseRequest' }
+      responses:
+        '200':
+          description: 灰度结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditActionResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /releases/{appid}/gray-plan:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    get:
+      tags: [releases]
+      operationId: getGrayReleasePlan
+      summary: 查询分阶段发布计划
+      responses:
+        '200':
+          description: 灰度计划
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GrayReleasePlan' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /releases/{appid}/revert-gray:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    post:
+      tags: [releases]
+      operationId: revertGrayRelease
+      summary: 取消分阶段发布
+      responses:
+        '200':
+          description: 结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditActionResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /releases/{appid}/history-versions:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    get:
+      tags: [releases]
+      operationId: listRevertVersions
+      summary: 可回退的历史版本（最多最近 5 个）
+      responses:
+        '200':
+          description: 历史版本
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/HistoryVersion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /releases/{appid}/revert:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    post:
+      tags: [releases]
+      operationId: revertRelease
+      summary: 版本回退（不传 appVersion 则回退到上一个版本）
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RevertRequest' }
+      responses:
+        '200':
+          description: 回退结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditActionResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /releases/{appid}/trial-qrcode:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    get:
+      tags: [releases]
+      operationId: getTrialQRCode
+      summary: 体验版二维码（返回 base64 图片）
+      parameters:
+        - name: path
+          in: query
+          description: 扫码后进入的页面（服务端会做一次 urlencode）
+          schema: { type: string }
+      responses:
+        '200':
+          description: 二维码
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QRCodeImage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /apps/{appid}/visit-status:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    get:
+      tags: [apps]
+      operationId: getVisitStatus
+      summary: 查询小程序服务状态
+      responses:
+        '200':
+          description: 服务状态
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VisitStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+    put:
+      tags: [apps]
+      operationId: setVisitStatus
+      summary: 暂停 / 恢复服务
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VisitStatusUpdateRequest' }
+      responses:
+        '200':
+          description: 服务状态
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VisitStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /apps/{appid}/pages:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    get:
+      tags: [apps]
+      operationId: listCodePages
+      summary: 已上传代码的页面列表（供提审配置选地址）
+      responses:
+        '200':
+          description: 页面列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /apps/{appid}/support-version:
+    parameters:
+      - $ref: '#/components/parameters/Appid'
+    get:
+      tags: [apps]
+      operationId: getSupportVersion
+      summary: 最低基础库版本与用户占比
+      responses:
+        '200':
+          description: 基础库
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupportVersion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+    put:
+      tags: [apps]
+      operationId: setSupportVersion
+      summary: 设置最低基础库版本
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SupportVersionUpdateRequest' }
+      responses:
+        '200':
+          description: 基础库
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupportVersion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '502': { $ref: '#/components/responses/WeChatError' }
+
+  /apps/domains/apply:
+    post:
+      tags: [apps]
+      operationId: applyDomains
+      summary: 批量配置小程序服务器域名 / 业务域名（托管后只能使用第三方平台登记的域名）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DomainApplyRequest' }
+      responses:
+        '200':
+          description: 逐项结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DomainApplyResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /audit-profiles:
+    get:
+      tags: [audits]
+      operationId: listAuditProfiles
+      summary: 提审配置列表（类目/标题/标签/UGC 声明等，供批量提审复用）
+      responses:
+        '200':
+          description: 列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditProfileListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [audits]
+      operationId: createAuditProfile
+      summary: 新建提审配置（itemList 的类目字段取自 GET /wxa/get_category，即 getAllCategoryName）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuditProfileUpsertRequest' }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditProfile' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /audit-profiles/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: integer, format: int64 }
+    patch:
+      tags: [audits]
+      operationId: updateAuditProfile
+      summary: 编辑提审配置
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuditProfileUpsertRequest' }
+      responses:
+        '200':
+          description: 更新后的配置
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditProfile' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [audits]
+      operationId: deleteAuditProfile
+      summary: 删除提审配置（被小程序引用时返回 409）
+      responses:
+        '204': { description: 已删除 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /logs/api-calls:
+    get:
+      tags: [logs]
+      operationId: listApiCallLogs
+      summary: 微信接口调用日志
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: appid
+          in: query
+          schema: { type: string }
+        - name: jobId
+          in: query
+          schema: { type: string }
+        - name: endpoint
+          in: query
+          schema: { type: string }
+        - name: errcode
+          in: query
+          schema: { type: integer }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiCallLogListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /logs/callbacks:
+    get:
+      tags: [logs]
+      operationId: listCallbackEvents
+      summary: 微信回调事件
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: kind
+          in: query
+          schema: { $ref: '#/components/schemas/CallbackKind' }
+        - name: appid
+          in: query
+          schema: { type: string }
+        - name: infoType
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CallbackEventListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /logs/operations:
+    get:
+      tags: [logs]
+      operationId: listOperationLogs
+      summary: 平台操作日志
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: action
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationLogListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: pageSize
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
+    Appid:
+      name: appid
+      in: path
+      required: true
+      schema: { type: string }
+    JobId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    Unauthorized:
+      description: 未认证或令牌无效
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: 状态冲突（如重复在途作业、未授权却要删除、额度耗尽）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ValidationError:
+      description: 参数校验失败
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooManyRequests:
+      description: 请求过于频繁
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    WeChatError:
+      description: 微信侧调用失败（message 内含 errcode 与官方 errmsg）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: 业务错误码，如 INVALID_CREDENTIALS / NOT_FOUND / VALIDATION_ERROR / WECHAT_API_ERROR
+        message: { type: string }
+        errcode:
+          type: integer
+          nullable: true
+          description: 微信返回码（如 85085、61039），仅微信侧失败时出现
+      additionalProperties: false
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string }
+      additionalProperties: false
+
+    LoginResponse:
+      type: object
+      required: [token, user]
+      properties:
+        token: { type: string }
+        user: { $ref: '#/components/schemas/UserInfo' }
+      additionalProperties: false
+
+    UserInfo:
+      type: object
+      required: [username, userType]
+      properties:
+        username: { type: string }
+        userType: { type: string, enum: [admin] }
+      additionalProperties: false
+
+    AuthorizationStatus:
+      type: string
+      enum: [authorized, unauthorized]
+
+    AuthType:
+      type: integer
+      description: 1 仅公众号 / 2 仅小程序 / 3 公众号+小程序 / 4 小程序推客 / 5 视频号 / 6 全部 / 8 带货助手
+      enum: [1, 2, 3, 4, 5, 6, 8]
+
+    TokenScope:
+      type: string
+      enum: [component, authorizer]
+
+    JobType:
+      type: string
+      description: |
+        commit 上传代码（生成体验版）/ submit_audit 提审 / release 发布 /
+        pipeline 全流程（commit → 隐私检测 → 提审 → 审核通过 → 发布）/
+        sync_info 同步授权方信息 / sync_audit_status 对账审核状态 /
+        undo_audit 撤回审核 / speedup_audit 加急 / set_domain 域名配置 /
+        revert 版本回退 / toggle_visit 服务状态
+      enum:
+        [commit, submit_audit, release, pipeline, sync_info, sync_audit_status, undo_audit, speedup_audit, set_domain, revert, toggle_visit]
+
+    JobStatus:
+      type: string
+      enum: [pending, running, paused, succeeded, partial_failed, failed, canceled, interrupted]
+
+    JobItemStatus:
+      type: string
+      description: waiting 表示在等前置条件（隐私检测完成 / 审核通过）或退避重试
+      enum: [pending, waiting, running, succeeded, failed, skipped, canceled]
+
+    JobStep:
+      type: string
+      description: |
+        commit 上传代码 / privacy_check 隐私检测 / submit_audit 提审 / release 发布 /
+        single 单步作业（sync_info、sync_audit_status、undo_audit、speedup_audit、
+        set_domain、revert、toggle_visit 这些类型只有一个步骤）
+      enum: [commit, privacy_check, submit_audit, release, single]
+
+    ErrorClass:
+      type: string
+      description: |
+        retryable 可重试 / token_expired 需刷新令牌 / rate_limited 频次或额度 /
+        environment 环境问题（IP 白名单等，需人工修复）/ permanent 永久失败 /
+        wechat_unknown 未归类
+      enum: [retryable, token_expired, rate_limited, environment, permanent, wechat_unknown]
+
+    CallbackKind:
+      type: string
+      enum: [component, message]
+
+    PlatformStatus:
+      type: object
+      required:
+        - componentAppid
+        - ticketFresh
+        - authorizationEventUrl
+        - messageEventUrl
+        - authAuthorized
+        - authUnauthorized
+        - jobRunning
+        - templateCount
+      properties:
+        componentAppid: { type: string }
+        componentAppidMasked: { type: string }
+        ticketFresh: { type: boolean, description: 最近票据是否在 20 分钟内收到 }
+        ticketAgeSeconds:
+          type: integer
+          format: int64
+          nullable: true
+        ticketUpdatedAt: { type: string, format: date-time, nullable: true }
+        componentTokenValid: { type: boolean }
+        componentTokenExpiresAt: { type: string, format: date-time, nullable: true }
+        authorizationEventUrl: { type: string, description: 需填入开放平台后台的授权事件接收 URL }
+        messageEventUrl: { type: string, description: 需填入开放平台后台的消息与事件接收 URL（含 $APPID$） }
+        authRedirectUri: { type: string }
+        authAuthorized: { type: integer }
+        authUnauthorized: { type: integer }
+        jobRunning: { type: integer }
+        jobFailed: { type: integer }
+        templateCount: { type: integer }
+        templateLimit: { type: integer }
+        auditQuota: { $ref: '#/components/schemas/AuditQuota' }
+        warnings:
+          type: array
+          description: 接入自检提示（缺票据、未配 IP 白名单、权限集缺失等）
+          items: { type: string }
+      additionalProperties: false
+
+    Settings:
+      type: object
+      required: [jobConcurrency, jobMaxAttempts, wxMaxQps, logRetentionDays, defaultTemplateId, defaultAuditProfileId]
+      properties:
+        jobConcurrency: { type: integer, minimum: 1, maximum: 8 }
+        jobMaxAttempts: { type: integer, minimum: 1, maximum: 8 }
+        wxMaxQps: { type: integer, minimum: 1, maximum: 50 }
+        logRetentionDays: { type: integer, minimum: 1, maximum: 365 }
+        defaultTemplateId: { type: integer, format: int64, nullable: true }
+        defaultAuditProfileId: { type: integer, format: int64, nullable: true }
+        wxRequestTimeoutSeconds: { type: integer, minimum: 1, maximum: 120 }
+        privacyCheckMaxWaitSeconds: { type: integer, minimum: 10, maximum: 3600 }
+        auditResultMaxWaitSeconds: { type: integer, minimum: 60, maximum: 604800 }
+      additionalProperties: false
+
+    SettingsUpdateRequest:
+      type: object
+      properties:
+        jobConcurrency: { type: integer, minimum: 1, maximum: 8 }
+        jobMaxAttempts: { type: integer, minimum: 1, maximum: 8 }
+        wxMaxQps: { type: integer, minimum: 1, maximum: 50 }
+        logRetentionDays: { type: integer, minimum: 1, maximum: 365 }
+        defaultTemplateId: { type: integer, format: int64, nullable: true }
+        defaultAuditProfileId: { type: integer, format: int64, nullable: true }
+        wxRequestTimeoutSeconds: { type: integer, minimum: 1, maximum: 120 }
+        privacyCheckMaxWaitSeconds: { type: integer, minimum: 10, maximum: 3600 }
+        auditResultMaxWaitSeconds: { type: integer, minimum: 60, maximum: 604800 }
+      additionalProperties: false
+
+    AppidSelection:
+      type: object
+      description: 目标小程序选择：appids 显式指定；filter 走筛选；都不传表示全部已授权且启用的小程序
+      properties:
+        appids:
+          type: array
+          items: { type: string }
+        filter: { $ref: '#/components/schemas/AuthorizerFilter' }
+      additionalProperties: false
+
+    AuthorizerFilter:
+      type: object
+      properties:
+        groupName: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        onlyDevPermission:
+          type: boolean
+          description: 仅选择已授权开发权限集（18）的小程序
+        includeDisabled: { type: boolean }
+      additionalProperties: false
+
+    SyncSummary:
+      type: object
+      required: [total, succeeded, failed]
+      properties:
+        total: { type: integer }
+        succeeded: { type: integer }
+        failed: { type: integer }
+        details:
+          type: array
+          items: { $ref: '#/components/schemas/SyncDetail' }
+      additionalProperties: false
+
+    SyncDetail:
+      type: object
+      required: [key, ok]
+      properties:
+        key: { type: string, description: appid / draft_id / template_id 等标识 }
+        ok: { type: boolean }
+        errcode: { type: integer, nullable: true }
+        errmsg: { type: string, nullable: true }
+      additionalProperties: false
+
+    Authorizer:
+      type: object
+      required:
+        - appid
+        - authorizationStatus
+        - enabled
+        - hasDevPermission
+        - createdAt
+      properties:
+        appid: { type: string }
+        nickName: { type: string, nullable: true }
+        headImg: { type: string, nullable: true }
+        qrcodeUrl: { type: string, nullable: true }
+        userName: { type: string, nullable: true, description: 原始 ID（gh_ 开头） }
+        principalName: { type: string, nullable: true }
+        signature: { type: string, nullable: true }
+        accountStatus: { type: integer, nullable: true, description: 1 正常 / 14 已注销 / 16 已封禁 / 18 已告警 / 19 已冻结 }
+        authorizationStatus: { $ref: '#/components/schemas/AuthorizationStatus' }
+        funcInfoIds:
+          type: array
+          description: 已授权权限集 id 列表（18=小程序开发与数据分析，代码管理必需）
+          items: { type: integer }
+        hasDevPermission: { type: boolean }
+        authorizedAt: { type: string, format: date-time, nullable: true }
+        lastSyncAt: { type: string, format: date-time, nullable: true }
+        refreshTokenUpdatedAt: { type: string, format: date-time, nullable: true }
+        remark: { type: string, nullable: true }
+        groupName: { type: string, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
+        extVars:
+          type: object
+          additionalProperties: { type: string }
+        auditProfileId: { type: integer, format: int64, nullable: true }
+        codeSource: { type: string, enum: [template, direct_commit] }
+        enabled: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    AuthorizerDetail:
+      allOf:
+        - $ref: '#/components/schemas/Authorizer'
+        - type: object
+          properties:
+            serviceTypeId: { type: integer, nullable: true }
+            verifyTypeId: { type: integer, nullable: true }
+            registerType: { type: integer, nullable: true }
+            alias: { type: string, nullable: true }
+            businessInfo:
+              type: object
+              additionalProperties: true
+              nullable: true
+            miniProgramCategories:
+              type: array
+              items: { $ref: '#/components/schemas/CategoryPair' }
+            auditOverride:
+              type: object
+              additionalProperties: true
+              nullable: true
+            effectiveDomains: { $ref: '#/components/schemas/DomainSnapshot' }
+            registeredDomains: { $ref: '#/components/schemas/DomainSnapshot' }
+            privacySettingConfigured:
+              type: boolean
+              nullable: true
+              description: 用户隐私保护指引是否已配置（体检用，可能为 null 表示未探测）
+            lastPreflightAt: { type: string, format: date-time, nullable: true }
+
+    CategoryPair:
+      type: object
+      required: [first, second]
+      properties:
+        first: { type: string }
+        second: { type: string }
+      additionalProperties: false
+
+    DomainSnapshot:
+      type: object
+      properties:
+        requestDomain:
+          type: array
+          items: { type: string }
+        wsRequestDomain:
+          type: array
+          items: { type: string }
+        uploadDomain:
+          type: array
+          items: { type: string }
+        downloadDomain:
+          type: array
+          items: { type: string }
+        udpDomain:
+          type: array
+          items: { type: string }
+        tcpDomain:
+          type: array
+          items: { type: string }
+        businessDomain:
+          type: array
+          items: { type: string }
+      additionalProperties: false
+
+    AuthorizerListResponse:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Authorizer' }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
+      additionalProperties: false
+
+    AuthorizerUpdateRequest:
+      type: object
+      properties:
+        remark: { type: string, nullable: true }
+        groupName: { type: string, nullable: true }
+        tags:
+          type: array
+          nullable: true
+          items: { type: string }
+        enabled: { type: boolean }
+        extVars:
+          type: object
+          nullable: true
+          additionalProperties: { type: string }
+        auditProfileId: { type: integer, format: int64, nullable: true }
+        auditOverride:
+          type: object
+          nullable: true
+          additionalProperties: true
+        codeSource: { type: string, enum: [template, direct_commit] }
+      additionalProperties: false
+
+    AuthorizationUrlResponse:
+      type: object
+      required: [preAuthCode, expiresInSeconds, pcUrl, mobileUrl, qrCodeContent]
+      properties:
+        preAuthCode: { type: string }
+        expiresInSeconds: { type: integer }
+        pcUrl: { type: string }
+        mobileUrl: { type: string }
+        qrCodeContent: { type: string, description: 供前端渲染二维码的内容（同 pcUrl） }
+        redirectUri: { type: string }
+        authType: { $ref: '#/components/schemas/AuthType' }
+        bizAppid: { type: string, nullable: true }
+      additionalProperties: false
+
+    AuthorizeRequest:
+      type: object
+      required: [authCode]
+      properties:
+        authCode: { type: string }
+      additionalProperties: false
+
+    AuthorizeResponse:
+      type: object
+      required: [appid, authorizationStatus, funcInfoIds]
+      properties:
+        appid: { type: string }
+        authorizationStatus: { $ref: '#/components/schemas/AuthorizationStatus' }
+        funcInfoIds:
+          type: array
+          items: { type: integer }
+        hasDevPermission: { type: boolean }
+        warnings:
+          type: array
+          items: { type: string }
+      additionalProperties: false
+
+    AuthorizerOptionName:
+      type: string
+      description: 地理位置上报 / 语音识别 / 多客服
+      enum: [location_report, voice_recognize, customer_service]
+
+    AuthorizerOption:
+      type: object
+      required: [optionName, optionValue]
+      properties:
+        optionName: { $ref: '#/components/schemas/AuthorizerOptionName' }
+        optionValue: { type: string }
+      additionalProperties: false
+
+    AuthorizerOptionUpdateRequest:
+      type: object
+      required: [optionName, optionValue]
+      properties:
+        optionName: { $ref: '#/components/schemas/AuthorizerOptionName' }
+        optionValue: { type: string }
+      additionalProperties: false
+
+    CodeDraft:
+      type: object
+      required: [draftId, syncedAt]
+      properties:
+        draftId: { type: integer, format: int64 }
+        userVersion: { type: string, nullable: true }
+        userDesc: { type: string, nullable: true }
+        sourceMiniProgramAppid: { type: string, nullable: true }
+        sourceMiniProgram: { type: string, nullable: true, description: 开发小程序名称 }
+        developer: { type: string, nullable: true }
+        createTime: { type: integer, format: int64, nullable: true }
+        syncedAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    DraftListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/CodeDraft' }
+      additionalProperties: false
+
+    AddToTemplateRequest:
+      type: object
+      properties:
+        templateType:
+          type: integer
+          description: 0 普通模板（默认，唯一可用）；1 标准模板（官方已下架）
+          enum: [0, 1]
+      additionalProperties: false
+
+    CodeTemplate:
+      type: object
+      required: [templateId, templateType, isDefault, syncedAt]
+      properties:
+        templateId: { type: integer, format: int64 }
+        templateType: { type: integer, enum: [0, 1] }
+        draftId: { type: integer, format: int64, nullable: true }
+        userVersion: { type: string, nullable: true }
+        userDesc: { type: string, nullable: true }
+        sourceMiniProgramAppid: { type: string, nullable: true }
+        sourceMiniProgram: { type: string, nullable: true }
+        developer: { type: string, nullable: true }
+        createTime: { type: integer, format: int64, nullable: true }
+        isDefault: { type: boolean }
+        note: { type: string, nullable: true }
+        syncedAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    TemplateListResponse:
+      type: object
+      required: [items, limit]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/CodeTemplate' }
+        limit: { type: integer, description: 模板库上限（官方 200） }
+      additionalProperties: false
+
+    TemplateUpdateRequest:
+      type: object
+      properties:
+        isDefault: { type: boolean }
+        note: { type: string, nullable: true }
+      additionalProperties: false
+
+    PreflightRequest:
+      type: object
+      required: [selection, purpose]
+      properties:
+        selection: { $ref: '#/components/schemas/AppidSelection' }
+        purpose:
+          type: string
+          description: 体检目的，决定检查项集合与错误码映射
+          enum: [commit, submit_audit, release]
+        requiredDomains: { $ref: '#/components/schemas/DomainRequirements' }
+      additionalProperties: false
+
+    DomainRequirements:
+      type: object
+      properties:
+        requestDomain:
+          type: array
+          items: { type: string }
+        businessDomain:
+          type: array
+          items: { type: string }
+      additionalProperties: false
+
+    PreflightResponse:
+      type: object
+      required: [items, readyCount, blockedCount]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/PreflightItem' }
+        readyCount: { type: integer }
+        blockedCount: { type: integer }
+        auditQuota: { $ref: '#/components/schemas/AuditQuota' }
+      additionalProperties: false
+
+    PreflightItem:
+      type: object
+      required: [appid, ready, checks]
+      properties:
+        appid: { type: string }
+        nickName: { type: string, nullable: true }
+        ready: { type: boolean }
+        checks:
+          type: array
+          items: { $ref: '#/components/schemas/PreflightCheck' }
+      additionalProperties: false
+
+    PreflightCheck:
+      type: object
+      required: [key, label, status, message]
+      properties:
+        key:
+          type: string
+          description: authorization / dev_permission / profile / category / privacy / domains / quota / template
+        label: { type: string }
+        status: { type: string, enum: [pass, warn, fail, unknown] }
+        message: { type: string }
+        hint: { type: string, nullable: true, description: 修复指引 }
+      additionalProperties: false
+
+    JobCreateRequest:
+      type: object
+      required: [type, selection]
+      properties:
+        type: { $ref: '#/components/schemas/JobType' }
+        selection: { $ref: '#/components/schemas/AppidSelection' }
+        concurrency: { type: integer, minimum: 1, maximum: 8 }
+        dryRun: { type: boolean }
+        commit: { $ref: '#/components/schemas/CommitOptions' }
+        audit: { $ref: '#/components/schemas/AuditOptions' }
+        release: { $ref: '#/components/schemas/ReleaseOptions' }
+        domain: { $ref: '#/components/schemas/DomainApplyRequest' }
+        pauseService:
+          type: boolean
+          nullable: true
+          description: |
+            toggle_visit 作业专用：true=暂停服务（close），false=恢复服务（open）。
+            其它作业类型忽略该字段。
+        note: { type: string, nullable: true }
+      additionalProperties: false
+
+    CommitOptions:
+      type: object
+      required: [templateId]
+      properties:
+        templateId: { type: integer, format: int64 }
+        userVersionPattern:
+          type: string
+          description: 版本号模式，支持 {{date}} {{time}} {{datetime}} {{appid}} {{nick_name}} {{template_id}} {{seq}}；渲染后须 ≤64 字符
+        userDescPattern: { type: string }
+        extTemplate:
+          type: string
+          nullable: true
+          description: ext_json 模板（高级模式）。为空时按「extAppid + ext」简单模式自动生成
+        extOverrides:
+          type: object
+          nullable: true
+          additionalProperties: { type: string }
+      additionalProperties: false
+
+    AuditOptions:
+      type: object
+      properties:
+        auditProfileId: { type: integer, format: int64, nullable: true }
+        versionDescPattern: { type: string }
+        privacyApiNotUse: { type: boolean, nullable: true }
+        orderPath: { type: string, nullable: true }
+      additionalProperties: false
+
+    ReleaseOptions:
+      type: object
+      properties:
+        grayPercentage: { type: integer, minimum: 0, maximum: 100, nullable: true }
+        supportDebugerFirst: { type: boolean, nullable: true }
+        supportExperiencerFirst: { type: boolean, nullable: true }
+      additionalProperties: false
+
+    Job:
+      type: object
+      required:
+        - id
+        - type
+        - status
+        - dryRun
+        - total
+        - succeeded
+        - failed
+        - skipped
+        - createdAt
+      properties:
+        id: { type: string }
+        type: { $ref: '#/components/schemas/JobType' }
+        status: { $ref: '#/components/schemas/JobStatus' }
+        dryRun: { type: boolean }
+        total: { type: integer }
+        succeeded: { type: integer }
+        failed: { type: integer }
+        skipped: { type: integer }
+        pending: { type: integer }
+        running: { type: integer }
+        waiting: { type: integer }
+        concurrency: { type: integer }
+        note: { type: string, nullable: true }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time, nullable: true }
+        finishedAt: { type: string, format: date-time, nullable: true }
+        errorNote: { type: string, nullable: true }
+        payload:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+
+    JobListResponse:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Job' }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
+      additionalProperties: false
+
+    JobItem:
+      type: object
+      required: [id, jobId, step, appid, status, attempt]
+      properties:
+        id: { type: integer, format: int64 }
+        jobId: { type: string }
+        step: { $ref: '#/components/schemas/JobStep' }
+        appid: { type: string }
+        nickName: { type: string, nullable: true }
+        status: { $ref: '#/components/schemas/JobItemStatus' }
+        attempt: { type: integer }
+        nextRunAt: { type: string, format: date-time, nullable: true }
+        userVersion: { type: string, nullable: true }
+        wxAuditId: { type: integer, format: int64, nullable: true }
+        errcode: { type: integer, nullable: true }
+        errmsg: { type: string, nullable: true }
+        errorClass: { $ref: '#/components/schemas/ErrorClass' }
+        request:
+          type: object
+          additionalProperties: true
+          nullable: true
+        response:
+          type: object
+          additionalProperties: true
+          nullable: true
+        startedAt: { type: string, format: date-time, nullable: true }
+        finishedAt: { type: string, format: date-time, nullable: true }
+      additionalProperties: false
+
+    JobItemListResponse:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/JobItem' }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
+      additionalProperties: false
+
+    JobPreviewResponse:
+      type: object
+      required: [items, validCount, invalidCount]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/JobPreviewItem' }
+        validCount: { type: integer }
+        invalidCount: { type: integer }
+      additionalProperties: false
+
+    JobPreviewItem:
+      type: object
+      required: [appid, valid, endpoint, payload, problems]
+      properties:
+        appid: { type: string }
+        nickName: { type: string, nullable: true }
+        valid: { type: boolean }
+        endpoint: { type: string, description: 将被调用的微信接口路径 }
+        payload:
+          type: object
+          additionalProperties: true
+          description: 最终将提交给微信的请求体（如 /wxa/commit 的 template_id/ext_json/user_version/user_desc）
+        problems:
+          type: array
+          items: { type: string }
+      additionalProperties: false
+
+    AuditStatus:
+      type: integer
+      description: 0 审核成功 / 1 审核被拒绝 / 2 审核中 / 3 已撤回 / 4 审核延后
+      enum: [0, 1, 2, 3, 4]
+
+    AuditRecord:
+      type: object
+      required: [appid, auditId, status, createdAt]
+      properties:
+        appid: { type: string }
+        auditId: { type: integer, format: int64 }
+        userVersion: { type: string, nullable: true }
+        userDesc: { type: string, nullable: true }
+        status: { $ref: '#/components/schemas/AuditStatus' }
+        reason: { type: string, nullable: true }
+        screenshotMediaIds:
+          type: array
+          items: { type: string }
+        submitTime: { type: string, format: date-time, nullable: true }
+        statusTime: { type: string, format: date-time, nullable: true }
+        source: { type: string, enum: [api, event, poll] }
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    AuditListResponse:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AuditRecord' }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
+      additionalProperties: false
+
+    AuditQuota:
+      type: object
+      description: 服务商级额度，旗下小程序共用；null 表示尚未探测
+      properties:
+        rest: { type: integer, nullable: true }
+        limit: { type: integer, nullable: true }
+        speedupRest: { type: integer, nullable: true }
+        speedupLimit: { type: integer, nullable: true }
+        queriedAt: { type: string, format: date-time, nullable: true }
+      additionalProperties: false
+
+    AuditActionResult:
+      type: object
+      required: [appid, ok]
+      properties:
+        appid: { type: string }
+        ok: { type: boolean }
+        errcode: { type: integer, nullable: true }
+        errmsg: { type: string, nullable: true }
+        message: { type: string, nullable: true }
+      additionalProperties: false
+
+    SpeedUpRequest:
+      type: object
+      required: [auditId]
+      properties:
+        auditId: { type: integer, format: int64 }
+      additionalProperties: false
+
+    ReleaseRecord:
+      type: object
+      required: [appid, action, createdAt]
+      properties:
+        appid: { type: string }
+        action: { type: string, enum: [release, grayrelease, revert] }
+        userVersion: { type: string, nullable: true }
+        grayPercentage: { type: integer, nullable: true }
+        releaseTime: { type: string, format: date-time, nullable: true }
+        note: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    ReleaseListResponse:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ReleaseRecord' }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
+      additionalProperties: false
+
+    VersionInfo:
+      type: object
+      required: [appid]
+      properties:
+        appid: { type: string }
+        expVersion: { type: string, nullable: true }
+        expDesc: { type: string, nullable: true }
+        expTime: { type: string, format: date-time, nullable: true }
+        releaseVersion: { type: string, nullable: true }
+        releaseDesc: { type: string, nullable: true }
+        releaseTime: { type: string, format: date-time, nullable: true }
+      additionalProperties: false
+
+    HistoryVersion:
+      type: object
+      required: [appVersion]
+      properties:
+        appVersion: { type: integer, format: int64 }
+        userVersion: { type: string, nullable: true }
+        userDesc: { type: string, nullable: true }
+        commitTime: { type: string, format: date-time, nullable: true }
+      additionalProperties: false
+
+    GrayReleaseRequest:
+      type: object
+      required: [grayPercentage]
+      properties:
+        grayPercentage: { type: integer, minimum: 0, maximum: 100 }
+        supportDebugerFirst: { type: boolean }
+        supportExperiencerFirst: { type: boolean }
+      additionalProperties: false
+
+    GrayReleasePlan:
+      type: object
+      properties:
+        status: { type: integer, nullable: true, description: 0 初始 / 1 执行中 / 2 暂停中 / 3 执行完毕 / 4 被删除 }
+        createTimestamp: { type: string, format: date-time, nullable: true }
+        grayPercentage: { type: integer, nullable: true }
+        supportDebugerFirst: { type: boolean, nullable: true }
+        supportExperiencerFirst: { type: boolean, nullable: true }
+      additionalProperties: false
+
+    RevertRequest:
+      type: object
+      properties:
+        appVersion: { type: integer, format: int64, nullable: true }
+      additionalProperties: false
+
+    QRCodeImage:
+      type: object
+      required: [appid, contentType, base64]
+      properties:
+        appid: { type: string }
+        contentType: { type: string }
+        base64: { type: string }
+      additionalProperties: false
+
+    VisitStatus:
+      type: object
+      required: [appid, paused]
+      properties:
+        appid: { type: string }
+        paused: { type: boolean, description: 0=已暂停服务（含违规被暂停），1=未暂停 }
+      additionalProperties: false
+
+    VisitStatusUpdateRequest:
+      type: object
+      required: [paused]
+      properties:
+        paused: { type: boolean }
+      additionalProperties: false
+
+    SupportVersion:
+      type: object
+      required: [appid]
+      properties:
+        appid: { type: string }
+        nowVersion: { type: string, nullable: true }
+        uvItems:
+          type: array
+          items: { $ref: '#/components/schemas/SupportVersionUV' }
+      additionalProperties: false
+
+    SupportVersionUV:
+      type: object
+      required: [version, percentage]
+      properties:
+        version: { type: string }
+        percentage: { type: number }
+      additionalProperties: false
+
+    SupportVersionUpdateRequest:
+      type: object
+      required: [version]
+      properties:
+        version: { type: string, description: 必须为已发布的基础库版本号 }
+      additionalProperties: false
+
+    DomainApplyRequest:
+      type: object
+      required: [selection, mode, action]
+      properties:
+        selection: { $ref: '#/components/schemas/AppidSelection' }
+        mode:
+          type: string
+          description: registered 先登记到第三方平台再配置（托管后唯一保留平台域名）；direct 快速配置（需发布上线后生效）
+          enum: [registered, direct]
+        action: { type: string, enum: [add, delete, set, get] }
+        serverDomain: { $ref: '#/components/schemas/DomainRequirements' }
+        businessDomain:
+          type: array
+          items: { type: string }
+      additionalProperties: false
+
+    DomainApplyResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/DomainApplyItem' }
+      additionalProperties: false
+
+    DomainApplyItem:
+      type: object
+      required: [appid, ok]
+      properties:
+        appid: { type: string }
+        ok: { type: boolean }
+        errcode: { type: integer, nullable: true }
+        errmsg: { type: string, nullable: true }
+        invalidDomains:
+          type: array
+          items: { type: string }
+        missingIcpDomains:
+          type: array
+          items: { type: string }
+      additionalProperties: false
+
+    AuditProfile:
+      type: object
+      required: [id, name, isDefault]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        isDefault: { type: boolean }
+        itemList:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: |
+            单条提审项，字段与 submit_audit 的 item_list 元素一致：
+            address（页面路径，取自 getCodePage）、tag（空格分隔的标签）、title（≤32 字）、
+            first_class/second_class/third_class（中文类目名）、first_id/second_id/third_id（数字 id）。
+            类目 6 个字段必须来自 GET /wxa/get_category（getAllCategoryName）。
+        versionDesc: { type: string, nullable: true }
+        ugcDeclare:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: UGC 审核机制声明（scene/method/other_scene_desc/has_audit_team/audit_desc）
+        privacyApiNotUse: { type: boolean, nullable: true }
+        orderPath: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    AuditProfileUpsertRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        isDefault: { type: boolean }
+        itemList:
+          type: object
+          additionalProperties: true
+          nullable: true
+        versionDesc: { type: string, nullable: true }
+        ugcDeclare:
+          type: object
+          additionalProperties: true
+          nullable: true
+        privacyApiNotUse: { type: boolean, nullable: true }
+        orderPath: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+      additionalProperties: false
+
+    AuditProfileListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AuditProfile' }
+      additionalProperties: false
+
+    ApiCallLog:
+      type: object
+      required: [id, endpoint, scope, ok, createdAt]
+      properties:
+        id: { type: integer, format: int64 }
+        jobId: { type: string, nullable: true }
+        appid: { type: string, nullable: true }
+        scope: { $ref: '#/components/schemas/TokenScope' }
+        endpoint: { type: string }
+        method: { type: string }
+        httpStatus: { type: integer }
+        ok: { type: boolean }
+        errcode: { type: integer, nullable: true }
+        errmsg: { type: string, nullable: true }
+        errorClass: { $ref: '#/components/schemas/ErrorClass' }
+        durationMs: { type: integer, format: int64 }
+        request:
+          type: object
+          additionalProperties: true
+          nullable: true
+        response:
+          type: object
+          additionalProperties: true
+          nullable: true
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    ApiCallLogListResponse:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ApiCallLog' }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
+      additionalProperties: false
+
+    CallbackEvent:
+      type: object
+      required: [id, kind, signatureOk, processed, receivedAt]
+      properties:
+        id: { type: integer, format: int64 }
+        kind: { $ref: '#/components/schemas/CallbackKind' }
+        appid: { type: string, nullable: true }
+        infoType: { type: string, nullable: true, description: component_verify_ticket / authorized / unauthorized / updateauthorized / weapp_audit_* }
+        event: { type: string, nullable: true }
+        decrypted:
+          type: string
+          nullable: true
+          description: 解密后的明文报文（原样保留，含换行）
+        signatureOk: { type: boolean }
+        processed: { type: boolean }
+        processNote: { type: string, nullable: true }
+        receivedAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    CallbackEventListResponse:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/CallbackEvent' }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
+      additionalProperties: false
+
+    OperationLog:
+      type: object
+      required: [id, actor, action, createdAt]
+      properties:
+        id: { type: integer, format: int64 }
+        actor: { type: string }
+        action: { type: string }
+        targetType: { type: string, nullable: true }
+        targetId: { type: string, nullable: true }
+        detail:
+          type: object
+          additionalProperties: true
+          nullable: true
+        ip: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+      additionalProperties: false
+
+    OperationLogListResponse:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OperationLog' }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
+      additionalProperties: false
+
+security:
+  - bearerAuth: []
