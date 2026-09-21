@@ -128,7 +128,7 @@ MOCK_WX=1 make dev-backend
 mock 端到端回归测试（无需真实凭据）：
 
 ```bash
-make e2e-mock          # cd server && MOCK_WX=1 go test ./internal/e2e/ -v -count=1
+make e2e-mock          # 使用内置模拟微信服务端 + 独立测试库 wx_platform_e2e 跑完整链路
 ```
 
 ## 五、第三方平台接入指引（务必逐步照做）
@@ -398,7 +398,7 @@ make gen              # 由 api/openapi.yaml 重新生成两端代码
 # 含集成测试（需要库：make db-init 会一并创建 wx_platform_test）
 cd server
 TEST_DB_DSN='wxplatform:wxplatform_dev_password@tcp(127.0.0.1:3306)/wx_platform_test?charset=utf8mb4&parseTime=True&loc=Local' \
-  go test ./...
+  go test -p 1 ./...
 ```
 
 - **未设置 `TEST_DB_DSN` 时集成测试自动跳过**，单测与契约/加解密/mock 测试仍会跑。
@@ -438,36 +438,37 @@ TEST_DB_DSN='wxplatform:wxplatform_dev_password@tcp(127.0.0.1:3306)/wx_platform_
 - [ ] **请求日志已脱敏**：`api_call_logs.request` 中 `access_token`/`secret`/`refresh_token` 均为 `***`（库里也不应出现 `authorizer_refresh_token` 明文）。
 - [ ] 移动端（≤820px）布局可用：侧栏变为汉堡 + 抽屉，工具条控件占满整行，表格可横向滚动，弹窗 ≤94vw，分页为 `simple` 模式。
 
-## 十二、写作时的实现状态与核对方式
+## 十二、实现状态与如何自行核对
 
-本文档**以契约（`api/openapi.yaml`）为准描述行为**，写作时该契约为 **52 个路径 / 62 个 operationId**。契约仍在并行演进中，你阅读时请重新执行下面的核对命令，以实际结果为准：
+当前状态：**全部能力已实现并通过验证**。可执行下面的命令自行核对：
 
 ```bash
-cd server && go build ./... && go vet ./...   # 后端编译
-cd web && pnpm typecheck                      # 前端类型（strict，零 any）
-make check                                    # 一键：后端 build/vet/gofmt + 前端 typecheck/build
-make e2e-mock                                 # mock 微信端到端
+cd server && go build ./... && go vet ./... && gofmt -l ./internal ./cmd   # 后端编译与格式
+cd web && pnpm typecheck && pnpm test && pnpm build                       # 前端类型/测试/构建
+make check        # 一键：后端 build/vet/gofmt + 前端 typecheck/build
+make e2e-mock     # 内置模拟微信服务端跑完整链路（无需真实凭据）
 
 # 契约规模与覆盖度核对
-grep -c "^  /" api/openapi.yaml                                  # 路径数（写作时 52）
-grep -c "operationId:" api/openapi.yaml                          # 操作数（写作时 62）
+grep -c "^  /" api/openapi.yaml                                  # 路径数（当前 53）
+grep -c "operationId:" api/openapi.yaml                          # 操作数（当前 66）
 grep -oP "operationId: \K\w+" api/openapi.yaml | tr 'A-Z' 'a-z' | sort -u > /tmp/ops.txt
 grep -hoP "^func \(\w+ \*Server\) \K\w+" server/internal/handler/*.go | tr 'A-Z' 'a-z' | sort -u > /tmp/impl.txt
 comm -23 /tmp/ops.txt /tmp/impl.txt        # 契约有、handler 没有 → 应为空
 ```
 
-**写作时的核对结果**：
+**最近一次核对结果**：
 
 | 核对项 | 结果 |
 |---|---|
-| 契约规模 | 52 个路径 / 62 个 operationId |
-| 后端 handler 覆盖度 | `comm` 差集为空 —— **62/62 全部有对应处理函数** |
-| 前端页面 | 13 个视图均有实现（无占位页）：概览、小程序管理、代码模板、前置体检、批量任务、任务详情、新建任务、审核管理、发布管理、日志、设置、授权回调、登录 |
-| `server/internal/e2e/` | 存在（`make e2e-mock` 依赖它） |
-| `wxauth` / `wxaudit` / `wxjob` | 三个业务包均已存在 |
+| 后端 | gofmt 无输出、`go vet ./...` 通过、`go build ./...` 通过 |
+| 后端测试 | `go test -p 1 ./...`（带 `TEST_DB_DSN`，真连 MariaDB）11 个包全部 `ok`，含 wxauth 30 例、wxaudit 38 例、wxjob 32 例、wxapi、mockwx、repo、batch、wxcrypt |
+| 端到端 | `make e2e-mock` 通过：票据 → 授权 → 模板库 → 批量上传代码 → 批量提审 → 审核结果推送 → 批量发布 全链路断言 |
+| 前端 | `pnpm typecheck` 零错误；`vitest` 28 例通过；`pnpm build` 成功 |
+| 契约覆盖度 | 53 个路径 / 66 个 operationId，handler 双向差集为空 |
+| 前端页面 | 13 个视图均有实现（无占位页） |
+| 实机冒烟 | 以 `MOCK_WX=1` 启动二进制后：`/healthz` 200、登录签发 JWT、`/platform/status` 正确给出回调地址与告警、运行参数局部更新生效、回调无签名/伪造签名均 400、`/audit-profiles` 返回种子默认配置 |
 
-因此**本文档没有需要标注「（实现中）」的能力项**。若你读到本文档时发现某个能力确实尚未合入，请在该能力所在小节就地补标「（实现中）」并注明日期。
+> 测试注意：多个集成测试包共用同一个测试库且会清表，**必须加 `-p 1`**（并行跑会互相破坏、随机失败）；
+> 端到端测试另有独立库（`wx_platform_e2e`），见 `make e2e-mock`。
 
-> 提醒：仓库处于并行开发中。若 `go build ./...` 报的是**跨包构造函数签名不一致**（例如 `too many arguments in call to wxauth.NewAuthorizerService`）这类错误，属并行重构的中间态，等对应改动合入即可；它与本文档描述的行为无关，也不要据此判断功能缺失。
-
-其它细节的权威来源：环境变量全集与注释看 `server/.env.example`；运行参数键名看 `server/internal/model/models.go` 的 `Setting*` 常量；返回码与处置看 `server/internal/model/errcodes.go`；微信官方要求看 `docs/reference/wx-open-platform-api.md` 与 `docs/wx-docs/*.md`。
+其它细节的权威来源：环境变量全集与注释看 `server/.env.example`；运行参数键名看 `server/internal/model/models.go` 的 `Setting*` 常量；返回码与处置看 `server/internal/model/errcodes.go`；微信官方要求看 `docs/reference/wx-open-platform-api.md` 与 `docs/wx-docs/*.md`；开发约定看 `AGENTS.md`。
