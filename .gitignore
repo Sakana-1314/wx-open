@@ -1,0 +1,30 @@
+# 构建产物
+bin/
+server/bin/
+web/dist/
+*.exe
+
+# 依赖与缓存
+node_modules/
+server/vendor/
+
+# 本地配置与数据（含密钥，绝不入库）
+.env
+server/.env
+web/.env
+web/.env.local
+data/
+
+# 参考资料的原始缓存与二进制包（体积大，不入库；解析后的 docs/wx-docs 与 docs/reference 保留）
+cache/
+demos/
+test1.html
+
+# 编辑器与系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.log
+tsconfig.tsbuildinfo
+web/node_modules/.tmp/

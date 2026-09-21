@@ -1,0 +1,63 @@
+name: 前端：类型·测试·构建·契约
+
+on:
+  push:
+    branches: [master, main]
+    paths: ["web/**", "api/**", ".github/workflows/ci-frontend.yml"]
+  pull_request:
+    paths: ["web/**", "api/**", ".github/workflows/ci-frontend.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-frontend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: 前端检查（typecheck / vitest / build / 契约）
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: 配置 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: 安装依赖
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查（vue-tsc，strict / 零 any）
+        working-directory: web
+        run: pnpm typecheck
+
+      - name: 单元测试（vitest）
+        working-directory: web
+        run: pnpm test
+
+      - name: 生产构建
+        working-directory: web
+        run: pnpm build
+
+      - name: 契约一致性（schema.d.ts 与 api/openapi.yaml 对齐）
+        working-directory: web
+        run: |
+          pnpm schema
+          if ! git diff --exit-code -- src/api/schema.d.ts; then
+            echo "❌ src/api/schema.d.ts 与 api/openapi.yaml 不一致"
+            echo "请在 web 目录执行 pnpm schema 并提交生成文件"
+            exit 1
+          fi
+          echo "✅ 契约一致"
