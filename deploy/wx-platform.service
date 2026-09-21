@@ -1,0 +1,42 @@
+# 微信第三方平台管理平台 —— systemd 单元示例
+#
+# 使用方式：
+#   1. 把后端二进制放到 /opt/wx-platform/bin/wx-platform，前端产物放到 /opt/wx-platform/web/dist
+#   2. 配置 /opt/wx-platform/server/.env（参考 server/.env.example，务必填 JWT_SECRET/ADMIN_PASSWORD 与微信凭据）
+#   3. cp deploy/wx-platform.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now wx-platform
+#
+# 注意：微信要求回调地址公网可达（https 对应 443 端口），并由 nginx 终止 TLS 后反代到本服务（默认 :8091）。
+
+[Unit]
+Description=微信第三方平台管理平台
+Documentation=file:///opt/wx-platform/README.md
+After=network-online.target mysql.service mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wxplatform
+Group=wxplatform
+WorkingDirectory=/opt/wx-platform/server
+# .env 由程序自行加载（godotenv），因此这里只需给出工作目录
+ExecStart=/opt/wx-platform/bin/wx-platform
+Restart=always
+RestartSec=3
+# 作业引擎在收到 SIGTERM 后会停止领取新子项并等待在途请求收尾，给足 30 秒
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# 回调与批量作业都是网络密集且需要稳定时钟，做些基础加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/wx-platform
+
+# 日志：journalctl -u wx-platform -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wx-platform
+
+[Install]
+WantedBy=multi-user.target

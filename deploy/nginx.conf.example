@@ -1,0 +1,76 @@
+# 微信第三方平台管理平台 —— nginx 反代示例
+#
+# 关键点（与微信的接入要求直接相关）：
+#   1. 回调必须公网可达，https 走 443 端口；微信会 POST 到
+#        https://<你的域名>/callback/component
+#        https://<你的域名>/callback/message/<APPID>
+#   2. 回调接口必须快速返回纯文本 success，因此不要在这里做鉴权、限流或缓冲；
+#      proxy_buffering off 可避免响应被 nginx 缓冲导致的延迟。
+#   3. 前端为 SPA，需要 history 模式回退到 index.html。
+#   4. 请在开放平台后台把本机公网出口 IP 加入 IP 白名单（未加白会返回 61004）。
+
+upstream wx_platform_backend {
+    server 127.0.0.1:8091;
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    server_name platform.example.com;
+    # 建议全部跳转到 https（微信回调只支持 80/443，且推荐 https）
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name platform.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/platform.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/platform.example.com/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    # 前端静态资源（web/dist 的构建产物）
+    root /opt/wx-platform/web/dist;
+    index index.html;
+
+    client_max_body_size 20m;
+
+    # 微信回调：不鉴权、不缓冲、原样转发
+    location /callback/ {
+        proxy_pass         http://wx_platform_backend;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_buffering    off;
+        proxy_read_timeout 30s;
+    }
+
+    # 平台 API（JWT 鉴权，前端 openapi-fetch 调用）
+    location /api/ {
+        proxy_pass         http://wx_platform_backend;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+
+    location = /healthz {
+        proxy_pass http://wx_platform_backend;
+    }
+
+    # SPA 路由回退（/authorize/callback 等前端路由不能 404）
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /assets/ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+}
