@@ -29,9 +29,20 @@ import (
 	"wx-platform/server/internal/wxtoken"
 )
 
+// 构建信息：由 Dockerfile / CI 通过 -ldflags "-X main.buildTime=... -X main.gitSHA=..." 注入，
+// 本地 go run 时为空串（不打印）。排查线上问题时用来确认跑的是哪个提交。
+var (
+	buildTime = ""
+	gitSHA    = ""
+)
+
 func main() {
 	// .env 可选：存在则加载，不存在时使用进程环境变量。
 	_ = godotenv.Load()
+
+	if buildTime != "" || gitSHA != "" {
+		log.Printf("构建信息：git=%s 构建时间=%s", gitSHA, buildTime)
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
