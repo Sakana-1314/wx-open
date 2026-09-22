@@ -1,0 +1,67 @@
+# 微信第三方平台管理平台 —— 容器编排样例
+#
+# 镜像来自 GitHub Actions 发布到 ghcr 的固定 tag（.github/workflows/build-images.yml）：
+#   ghcr.io/sakana-1314/wx-open:server   后端（Go，:8091）
+#   ghcr.io/sakana-1314/wx-open:web      前端 + nginx（:80，反代 /api 与 /callback 到 server）
+#
+# 用法：
+#   1. cp deploy/.env.docker.example deploy/.env && 填好 JWT_SECRET / ADMIN_PASSWORD / 微信凭据
+#   2. mysql -u root < db/init.sql          # 建库建用户（只做一次）
+#   3. cd deploy && docker compose --env-file .env up -d
+#
+# 注意：
+#   - 数据库不在本 compose 内：用外部 MySQL/MariaDB（DB_HOST 指向即可），避免误删数据卷。
+#   - 微信回调必须公网可达：把宿主 80/443 反代到 web 服务（或用 deploy/nginx.conf.example）。
+#   - 单实例部署：作业引擎靠数据库排他锁保证不重复下发，不要 scale server。
+
+name: wx-open
+
+services:
+  server:
+    image: ghcr.io/sakana-1314/wx-open:server
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      SERVER_PORT: "8091"
+      # 公网回调基址必须与开放平台后台填写的一致。
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL 必须配置}
+      DB_HOST: ${DB_HOST:?DB_HOST 必须指向外部 MySQL}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_USER: ${DB_USER:-wxplatform}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 必须配置}
+      DB_NAME: ${DB_NAME:-wx_platform}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET 必须配置}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD 必须配置}
+    ports:
+      # 默认只绑回环：公网流量一律经 web 容器的 nginx 进来（回调路径固定）。
+      - "127.0.0.1:${SERVER_PORT:-8091}:8091"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8091/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  web:
+    image: ghcr.io/sakana-1314/wx-open:web
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      # nginx 模板变量：反代目标就是上面的服务名。
+      BACKEND_HOST: server
+      BACKEND_PORT: "8091"
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  default:
+    name: wx-open
