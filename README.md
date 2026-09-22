@@ -37,13 +37,18 @@
 | 契约 | `api/openapi.yaml`（OpenAPI 3.0）为前后端对齐的唯一依据 |
 | 代码生成 | Go：`oapi-codegen`（types + gin）→ `server/internal/gen/api.gen.go`；TS：`openapi-typescript` → `web/src/api/schema.d.ts` |
 | 端口 | 后端 `:8091`，前端开发服务器 `:5174`（Vite 将 `/api` 代理到后端） |
+| 部署 | 容器镜像发布到 ghcr：`ghcr.io/sakana-1314/wx-open:server` / `:web`（详见 4.5） |
+| CI/CD | GitHub Actions：`.github/workflows/ci-backend.yml`、`ci-frontend.yml`、`build-images.yml` |
 
 ## 三、目录结构
 
 ```
 ├── api/openapi.yaml          # 唯一接口契约（52 路径 / 62 操作）
 ├── db/init.sql               # 建库建用户（wx_platform / wx_platform_test）
+├── deploy/                   # 部署样例：docker-compose.yml、systemd 单元、nginx 反代
+├── .github/workflows/        # CI：后端检查 / 前端检查 / 镜像构建发布（ghcr）
 ├── server/
+│   ├── Dockerfile            # 后端镜像（golang 构建 → alpine 运行，非 root）
 │   ├── cmd/server/main.go    # 入口：加载 .env → 连库 → 迁移/种子 → 令牌 → 回调 → 作业引擎
 │   └── internal/
 │       ├── config/           # 环境变量 → 类型化配置（凭据可缺省，缺失不 panic）
@@ -66,12 +71,15 @@
 │       ├── service/          # 组装：Container（唯一 handler 依赖入口）、Auth/Logs、回调业务分发
 │       ├── handler/          # 实现 oapi-codegen 的 ServerInterface：只做参数绑定与响应写出
 │       └── router/           # 路由、CORS、统一 JSON 错误、公开回调路由注册
-└── web/src/
-    ├── api/                  # client.ts（openapi-fetch + Bearer）、schema.d.ts（生成，勿手改）
-    ├── layouts/              # 侧栏（桌面 220/64px 可折叠；≤820px 汉堡 + 抽屉）
-    ├── views/                # 概览 / 小程序管理 / 代码模板 / 前置体检 / 批量任务 / 任务详情 /
-    │                         #   新建任务 / 审核管理 / 发布管理 / 日志 / 设置 / 授权回调 / 登录
-    └── components/           # PageHeader / StatusTag 等
+└── web/
+    ├── Dockerfile            # 前端镜像（pnpm build → nginx 托管 + 反代 /api、/callback）
+    ├── nginx.conf            # 容器内 nginx 模板（BACKEND_HOST/BACKEND_PORT 经 envsubst 注入）
+    └── src/
+        ├── api/              # client.ts（openapi-fetch + Bearer）、schema.d.ts（生成，勿手改）
+        ├── layouts/          # 侧栏（桌面 220/64px 可折叠；≤820px 汉堡 + 抽屉）
+        ├── views/            # 概览 / 小程序管理 / 代码模板 / 前置体检 / 批量任务 / 任务详情 /
+        │                     #   新建任务 / 审核管理 / 发布管理 / 日志 / 设置 / 授权回调 / 登录
+        └── components/       # PageHeader / StatusTag 等
 ```
 
 ## 四、快速开始
@@ -130,6 +138,37 @@ mock 端到端回归测试（无需真实凭据）：
 ```bash
 make e2e-mock          # 使用内置模拟微信服务端 + 独立测试库 wx_platform_e2e 跑完整链路
 ```
+
+### 4.5 容器化部署（镜像由 GitHub Actions 发布）
+
+后端与前端各有一个 Dockerfile，镜像发布在 ghcr，**tag 固定为组件名**：
+
+| 镜像 | 内容 | 端口 |
+|---|---|---|
+| `ghcr.io/sakana-1314/wx-open:server` | Go 后端（alpine + 静态二进制，非 root 运行） | `8091` |
+| `ghcr.io/sakana-1314/wx-open:web` | 前端静态产物 + nginx（反代 `/api`、`/callback` 到 server） | `80` |
+
+```bash
+# 1. 建库（一次性）
+mysql -u root < db/init.sql
+
+# 2. 准备环境变量
+cp deploy/.env.docker.example deploy/.env      # 填 JWT_SECRET / ADMIN_PASSWORD / 微信凭据 / PUBLIC_BASE_URL
+
+# 3. 起服务（数据库用外部 MySQL，不在 compose 内）
+cd deploy && docker compose --env-file .env up -d
+docker compose --env-file .env ps              # 两个容器都应为 healthy
+curl -s http://127.0.0.1:8080/healthz          # {"status":"ok"}
+```
+
+- 浏览器访问 `http://<宿主>:8080`（`WEB_PORT` 可改）；公网必须把 443 反代到 web 容器，微信回调地址为
+  `https://<域名>/callback/component` 与 `https://<域名>/callback/message/<APPID>`。
+- web 容器里的 nginx 已经把 `/callback/` 配成不缓冲、不鉴权、原样转发；外层的 nginx/CDN **不要**再对回调做鉴权或缓冲。
+- 不想用容器时，仍可用 `deploy/wx-platform.service` + `deploy/nginx.conf.example` 走二进制部署。
+- 单实例约束：作业引擎靠数据库排他锁避免重复下发，**不要对 server 扩容**。
+
+镜像发布流程见 `.github/workflows/build-images.yml`：push 到 `main`（或手动触发）时按变更路径构建两个组件并推送
+`:server` / `:web` 两个 tag；PR 只构建不推送。仓库公开时 ghcr 包默认公开，匿名 `docker pull` 可用。
 
 ## 五、第三方平台接入指引（务必逐步照做）
 
@@ -404,6 +443,16 @@ TEST_DB_DSN='wxplatform:wxplatform_dev_password@tcp(127.0.0.1:3306)/wx_platform_
 - **未设置 `TEST_DB_DSN` 时集成测试自动跳过**，单测与契约/加解密/mock 测试仍会跑。
 - 测试**不得依赖真实微信**：一律用 `server/internal/mockwx`，并把 `WX_API_BASE` 指向 `httptest` 服务。
 - 前端 `pnpm typecheck`（vue-tsc，strict，零 `any`）与 `go build ./...` 同时通过，即视为契约一致。
+
+### 9.1 CI（GitHub Actions）
+
+| 工作流 | 触发 | 内容 |
+|---|---|---|
+| `ci-backend.yml` | push / PR 到 `main`（`server/**`、`api/**`） | gofmt → go vet → go build → 生成文件 diff → `go test -p 1`（起真实 MySQL 服务）→ mock 端到端 |
+| `ci-frontend.yml` | push / PR 到 `main`（`web/**`、`api/**`） | pnpm install → typecheck → vitest → build → `schema.d.ts` diff |
+| `build-images.yml` | push 到 `main` / PR（`server/**`、`web/**`、`api/**`）与手动触发 | 按变更路径构建镜像；**只有 push 到 `main` 与手动触发才推送到 ghcr** |
+
+两个契约 diff 步骤会重新生成 `api.gen.go` / `schema.d.ts` 并比对：**忘记跑 `make gen` 会直接失败**。
 
 ## 十、非目标与扩展点
 
