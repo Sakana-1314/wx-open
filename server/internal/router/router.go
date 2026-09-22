@@ -38,9 +38,13 @@ func NewRouter(srv *handler.Server, am *auth.Manager, callbacks CallbackRegistra
 	r.NoRoute(noRouteHandler)
 	r.NoMethod(noMethodHandler)
 
-	r.GET("/healthz", func(c *gin.Context) {
+	// 健康检查同时支持 GET 与 HEAD：Docker/K8s/负载均衡的探针常用 HEAD
+	// （wget --spider、curl -I），只注册 GET 会返回 405，容器永远无法变为 healthy。
+	healthz := func(c *gin.Context) {
 		c.JSON(http.StatusOK, HealthResponse{Status: "ok"})
-	})
+	}
+	r.GET("/healthz", healthz)
+	r.HEAD("/healthz", healthz)
 
 	if callbacks != nil {
 		callbacks.RegisterCallbacks(r)
