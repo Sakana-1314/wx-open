@@ -454,6 +454,8 @@ TEST_DB_DSN='wxplatform:wxplatform_dev_password@tcp(127.0.0.1:3306)/wx_platform_
 
 两个契约 diff 步骤会重新生成 `api.gen.go` / `schema.d.ts` 并比对：**忘记跑 `make gen` 会直接失败**。
 
+CI 只在 `server/**`、`web/**`、`api/**` 变更时触发（`api/**` 变更会同时触发前后端两个检查，因为两端契约都源自它）。
+
 ## 十、非目标与扩展点
 
 | 项 | 说明 |
