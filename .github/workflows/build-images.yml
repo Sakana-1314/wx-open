@@ -1,0 +1,219 @@
+name: 构建并发布镜像
+
+# 镜像：ghcr.io/<owner>/wx-open:<tag>，tag 固定为 server 与 web 两个（不做 sha / 版本号 tag），
+# 部署端永远拉 ghcr.io/sakana-1314/wx-open:server 与 :web。
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/**"
+      - "web/**"
+      - "api/**"
+      - ".github/workflows/build-images.yml"
+  pull_request:
+    paths:
+      - "server/**"
+      - "web/**"
+      - "api/**"
+      - ".github/workflows/build-images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # 推送到 GitHub Container Registry 用内置 GITHUB_TOKEN 即可，无需在仓库里配用户名 / 密码。
+  packages: write
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  # 镜像名必须全小写（大写会被 registry 拒绝），账号是 Sakana-1314，因此下面统一下转小写。
+  IMAGE_NAMESPACE: ${{ github.repository_owner }}
+  IMAGE_NAME: wx-open
+  # 只有 main 分支 push 与手动触发才推送镜像；pull_request 一律只构建，不推送。
+  SHOULD_PUSH_IMAGE: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+
+jobs:
+  changes:
+    name: 检测变更组件
+    runs-on: ubuntu-latest
+    outputs:
+      components: ${{ steps.set-components.outputs.components }}
+    steps:
+      - name: 检出代码（完整历史，供变更比对）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 检测服务端 / 前端文件变更
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          list-files: none
+          filters: |
+            server:
+              - 'server/**'
+              - 'api/**'
+              - '.github/workflows/build-images.yml'
+            web:
+              - 'web/**'
+              - 'api/**'
+              - '.github/workflows/build-images.yml'
+
+      - name: 汇总需要构建的组件
+        id: set-components
+        run: |
+          # 手动触发时固定构建前后端两个组件，便于强制刷新 :server / :web 两个 tag。
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo 'components=["server","web"]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          COMPONENTS="[]"
+          if [ "${{ steps.filter.outputs.server }}" = "true" ]; then
+            COMPONENTS="$(printf '%s' "$COMPONENTS" | jq -c '. + ["server"]')"
+          fi
+          if [ "${{ steps.filter.outputs.web }}" = "true" ]; then
+            COMPONENTS="$(printf '%s' "$COMPONENTS" | jq -c '. + ["web"]')"
+          fi
+          echo "components=$COMPONENTS" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: 构建 ${{ matrix.component }} 镜像
+    needs: changes
+    if: needs.changes.outputs.components != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.changes.outputs.components) }}
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 生成构建信息
+        id: buildinfo
+        run: echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: 设置组件构建参数
+        id: settings
+        run: |
+          if [ "${{ matrix.component }}" = "server" ]; then
+            echo "context=./server" >> "$GITHUB_OUTPUT"
+            echo "dockerfile=./server/Dockerfile" >> "$GITHUB_OUTPUT"
+            {
+              echo "build_args<<EOF"
+              echo "BUILD_TIME=${{ steps.buildinfo.outputs.build_time }}"
+              echo "GIT_SHA=${{ github.sha }}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "context=./web" >> "$GITHUB_OUTPUT"
+            echo "dockerfile=./web/Dockerfile" >> "$GITHUB_OUTPUT"
+            {
+              echo "build_args<<EOF"
+              # 留空：前端走同源相对 /api/v1，由 web 容器内的 nginx 反代到 server 容器。
+              echo "HOST="
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 配置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GitHub Container Registry
+        if: env.SHOULD_PUSH_IMAGE == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算镜像命名空间（转小写）
+        id: owner
+        env:
+          OWNER: ${{ env.IMAGE_NAMESPACE }}
+        run: echo "name=${OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: 生成镜像元数据
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # tag 固定为组件名：:server / :web（不加 sha 与版本号，部署端只认这两个）。
+          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ matrix.component }},enable=${{ env.SHOULD_PUSH_IMAGE }}
+            type=raw,value=${{ matrix.component }}-sha-${{ github.sha }},enable=${{ env.SHOULD_PUSH_IMAGE }}
+          labels: |
+            org.opencontainers.image.title=wx-open-${{ matrix.component }}
+            org.opencontainers.image.description=微信第三方平台管理平台（${{ matrix.component }}）
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: 构建并按需推送镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.settings.outputs.context }}
+          file: ${{ steps.settings.outputs.dockerfile }}
+          build-args: ${{ steps.settings.outputs.build_args }}
+          push: ${{ env.SHOULD_PUSH_IMAGE == 'true' }}
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+          provenance: false
+          sbom: false
+
+      - name: 输出镜像地址
+        run: |
+          echo "### ${{ matrix.component }} 镜像" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/${{ env.IMAGE_NAME }}:${{ matrix.component }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "推送：${{ env.SHOULD_PUSH_IMAGE }}" >> "$GITHUB_STEP_SUMMARY"
+
+  verify:
+    name: 校验镜像可拉取
+    needs: build
+    if: needs.build.result == 'success' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 计算镜像命名空间（转小写）
+        id: owner
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "name=${OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: 匿名拉取 tags 列表（验证 ghcr 上确实存在 :server / :web）
+        env:
+          REPO: ${{ steps.owner.outputs.name }}/${{ env.IMAGE_NAME }}
+          OWNER_RAW: ${{ github.repository_owner }}
+        run: |
+          # 用匿名 token 访问 registry，等价于部署端的 docker pull（不带凭据）。
+          TOKEN="$(curl -fsS -m 30 "https://ghcr.io/token?scope=repository:${REPO}:pull&service=ghcr.io" \
+            | jq -r '.token // empty')"
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::无法获取匿名 pull token，跳过校验"
+            exit 0
+          fi
+          TAGS="$(curl -fsS -m 30 -H "Authorization: Bearer ${TOKEN}" \
+            "https://ghcr.io/v2/${REPO}/tags/list" || true)"
+          {
+            echo "### ghcr 镜像"
+            echo ""
+            echo '```'
+            echo "ghcr.io/${REPO}:server"
+            echo "ghcr.io/${REPO}:web"
+            echo '```'
+            echo "registry 上现有 tag：\`$(printf '%s' "$TAGS" | jq -c '.tags // []')\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$TAGS" ]; then
+            {
+              echo ""
+              echo "匿名拉取未成功：如果部署端 `docker pull` 报 unauthorized，"
+              echo "请在 https://github.com/users/${OWNER_RAW}/packages/container/${IMAGE_NAME}/settings "
+              echo "把包可见性改为 Public（并确认已关联到本仓库）。"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
