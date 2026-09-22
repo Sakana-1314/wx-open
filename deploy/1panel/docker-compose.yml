@@ -1,0 +1,73 @@
+# 1Panel 主机部署编排（与主机上其它服务格式一致）
+#
+# 实际部署位置：目标主机的 /opt/1panel/docker/compose/wx-open/
+# 本目录是可直接拷过去的模板；拷到主机后按需改 .env（真实密钥只存在于主机上）。
+#
+# 与 deploy/docker-compose.yml 的差异（这些都是为了贴合该主机的既有约定）：
+#   - 接入外部网络 1panel-network（该主机所有服务都在这个网络里，直接用容器名互访）
+#   - 容器名用 PascalCase（WxOpen-Server / WxOpen-Web），与 TrackManager-API 等保持一致
+#   - 只暴露 web 的高位端口 24758（该主机惯用 24xxx 段承接对外服务）
+#   - 镜像走南京大学镜像站：该主机直连 ghcr.io 会 TLS 重置，拉不动
+#   - 数据库复用主机上已有的 MySQL 容器（容器名 MySQL），不另起数据库容器
+
+services:
+  server:
+    image: ghcr.nju.edu.cn/sakana-1314/wx-open:server
+    container_name: WxOpen-Server
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      - SERVER_PORT=8091
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL}
+      - DB_HOST=MySQL
+      - DB_PORT=3306
+      - DB_USER=wxplatform
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=wx_platform
+      - JWT_SECRET=${JWT_SECRET}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - SECRET_ENC_KEY=${SECRET_ENC_KEY}
+      - WX_COMPONENT_APPID=${WX_COMPONENT_APPID}
+      - WX_COMPONENT_APPSECRET=${WX_COMPONENT_APPSECRET}
+      - WX_COMPONENT_VERIFY_TOKEN=${WX_COMPONENT_VERIFY_TOKEN}
+      - WX_COMPONENT_ENCODING_AES_KEY=${WX_COMPONENT_ENCODING_AES_KEY}
+      - JOB_CONCURRENCY=3
+      - WX_MAX_QPS=8
+      - LOG_RETENTION_DAYS=30
+    expose:
+      - 8091
+    networks:
+      - 1panel-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8091/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  web:
+    image: ghcr.nju.edu.cn/sakana-1314/wx-open:web
+    container_name: WxOpen-Web
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      - BACKEND_HOST=server
+      - BACKEND_PORT=8091
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - 24758:80
+    networks:
+      - 1panel-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  1panel-network:
+    external: true
+    name: 1panel-network
