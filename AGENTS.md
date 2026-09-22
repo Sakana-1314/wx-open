@@ -166,6 +166,16 @@ pnpm build
 
 仓库根目录还有一键检查：`make check`；mock 端到端：`make e2e-mock`。
 
+**本地数据库要开 MySQL 8 同款严格模式**：本机 MariaDB 默认容忍零日期，而 CI 用的是 MySQL 8，
+会把 `datetime` 列的 `'0000-00-00'` 直接判成 `1292`，导致「本地全绿、CI 全红」。跑集成测试前执行一次：
+
+```bash
+mysql -u root -e "SET GLOBAL sql_mode='STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';"
+```
+
+同理，新增**非指针** `time.Time` 字段时要给它 `gorm:"autoCreateTime"`（或保证调用方一定赋值），
+否则零值会被写成零日期。
+
 ## 9. 契约同步
 
 改任何接口 / 字段 / 枚举，只改 `api/openapi.yaml`，然后：
