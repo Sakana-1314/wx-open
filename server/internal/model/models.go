@@ -309,17 +309,19 @@ func (TokenCache) TableName() string { return "token_cache" }
 
 // CodeDraft 草稿箱快照（每个开发小程序只保留最新一份上传记录）。
 type CodeDraft struct {
-	ID                     uint      `gorm:"primaryKey" json:"id"`
-	DraftID                int64     `gorm:"uniqueIndex" json:"draftId"`
-	UserVersion            string    `gorm:"size:128" json:"userVersion"`
-	UserDesc               string    `gorm:"size:512" json:"userDesc"`
-	SourceMiniProgramAppid string    `gorm:"size:64;index" json:"sourceMiniProgramAppid"`
-	SourceMiniProgram      string    `gorm:"size:255" json:"sourceMiniProgram"`
-	Developer              string    `gorm:"size:128" json:"developer"`
-	CreateTime             int64     `json:"createTime"`
-	SyncedAt               time.Time `json:"syncedAt"`
-	CreatedAt              time.Time `json:"createdAt"`
-	UpdatedAt              time.Time `json:"updatedAt"`
+	ID                     uint   `gorm:"primaryKey" json:"id"`
+	DraftID                int64  `gorm:"uniqueIndex" json:"draftId"`
+	UserVersion            string `gorm:"size:128" json:"userVersion"`
+	UserDesc               string `gorm:"size:512" json:"userDesc"`
+	SourceMiniProgramAppid string `gorm:"size:64;index" json:"sourceMiniProgramAppid"`
+	SourceMiniProgram      string `gorm:"size:255" json:"sourceMiniProgram"`
+	Developer              string `gorm:"size:128" json:"developer"`
+	CreateTime             int64  `json:"createTime"`
+	// autoCreateTime：该列 NOT NULL，调用方漏填时为 0 值会写成 '0000-00-00'，
+	// MySQL 8 严格模式直接报 1292（MariaDB 默认容忍，因此本机测不出来）。填零值时由 GORM 补当前时间。
+	SyncedAt  time.Time `gorm:"autoCreateTime" json:"syncedAt"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // TableName 指定表名。
@@ -327,21 +329,22 @@ func (CodeDraft) TableName() string { return "code_drafts" }
 
 // CodeTemplate 模板库快照（模板不会被覆盖；仅普通模板可用于下发）。
 type CodeTemplate struct {
-	ID                     uint      `gorm:"primaryKey" json:"id"`
-	TemplateID             int64     `gorm:"uniqueIndex" json:"templateId"`
-	DraftID                int64     `json:"draftId"`
-	TemplateType           int       `json:"templateType"`
-	UserVersion            string    `gorm:"size:128" json:"userVersion"`
-	UserDesc               string    `gorm:"size:512" json:"userDesc"`
-	SourceMiniProgramAppid string    `gorm:"size:64;index" json:"sourceMiniProgramAppid"`
-	SourceMiniProgram      string    `gorm:"size:255" json:"sourceMiniProgram"`
-	Developer              string    `gorm:"size:128" json:"developer"`
-	CreateTime             int64     `json:"createTime"`
-	IsDefault              bool      `json:"isDefault"`
-	Note                   string    `gorm:"size:512" json:"note"`
-	SyncedAt               time.Time `json:"syncedAt"`
-	CreatedAt              time.Time `json:"createdAt"`
-	UpdatedAt              time.Time `json:"updatedAt"`
+	ID                     uint   `gorm:"primaryKey" json:"id"`
+	TemplateID             int64  `gorm:"uniqueIndex" json:"templateId"`
+	DraftID                int64  `json:"draftId"`
+	TemplateType           int    `json:"templateType"`
+	UserVersion            string `gorm:"size:128" json:"userVersion"`
+	UserDesc               string `gorm:"size:512" json:"userDesc"`
+	SourceMiniProgramAppid string `gorm:"size:64;index" json:"sourceMiniProgramAppid"`
+	SourceMiniProgram      string `gorm:"size:255" json:"sourceMiniProgram"`
+	Developer              string `gorm:"size:128" json:"developer"`
+	CreateTime             int64  `json:"createTime"`
+	IsDefault              bool   `json:"isDefault"`
+	Note                   string `gorm:"size:512" json:"note"`
+	// autoCreateTime：同 CodeDraft.SyncedAt，避免零值写成 '0000-00-00' 被 MySQL 8 严格模式拒绝。
+	SyncedAt  time.Time `gorm:"autoCreateTime" json:"syncedAt"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // TableName 指定表名。
