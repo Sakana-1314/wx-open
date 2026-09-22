@@ -42,6 +42,9 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: server/go.mod
+          # go.mod 在 server/ 下，缓存键必须显式指向 server/go.sum，
+          # 否则 setup-go 会在仓库根目录找不到依赖清单并放弃缓存。
+          cache-dependency-path: server/go.sum
 
       - name: gofmt 格式检查
         working-directory: server
@@ -79,6 +82,14 @@ jobs:
         env:
           TEST_DB_DSN: "root:root@tcp(127.0.0.1:3306)/wx_platform_test?charset=utf8mb4&parseTime=True&loc=Local"
         run: go test -p 1 ./...
+
+      # mysql 服务只能通过 MYSQL_DATABASE 预建一个库，端到端测试用的是另一个独立库
+      # （e2e 会清空全部业务表，和集成测试共库会互相破坏），因此这里显式补建。
+      - name: 创建端到端测试库
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -uroot -proot \
+            -e "CREATE DATABASE IF NOT EXISTS wx_platform_e2e CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+          echo "✅ 已创建 wx_platform_e2e"
 
       - name: 端到端测试（内置模拟微信服务端，无需真实凭据）
         working-directory: server
