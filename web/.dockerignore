@@ -1,0 +1,8 @@
+# 本地构建产物与依赖不进镜像（.env.production 可能含内网地址）。
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.log
+tsconfig.tsbuildinfo
