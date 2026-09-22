@@ -26,7 +26,7 @@
 | 运行参数设置 | 设置 | `GET/PUT /platform/settings`、`GET /platform/status` | 并发、最大尝试次数、QPS、日志保留天数、默认模板/提审配置、超时与等待上限 |
 | 单小程序运维 | 小程序管理 → 详情 | `/apps/{appid}/visit-status`、`/pages`、`/support-version`、`/apps/domains/apply`、`/releases/{appid}/trial-qrcode`、`/releases/{appid}/version` | 服务状态开关、页面列表、基础库版本与用户占比、域名批量配置、体验版二维码与版本信息 |
 
-契约共 **52 个路径 / 62 个 operationId**（`grep -c "^  /" api/openapi.yaml` 与 `grep -c operationId api/openapi.yaml`），上表未逐条列举的以 `api/openapi.yaml` 为准。微信回调 `/callback/component`、`/callback/message/:appid` **不在契约内**：它们收发 XML 且成功时必须返回纯文本 `success`，与 JSON 契约不兼容，在 `server/internal/router` 中单独注册。
+契约共 **53 个路径 / 63 个 operationId**（`grep -c "^  /" api/openapi.yaml` 与 `grep -c operationId api/openapi.yaml`），上表未逐条列举的以 `api/openapi.yaml` 为准。微信回调 `/callback/component`、`/callback/message/:appid` **不在契约内**：它们收发 XML 且成功时必须返回纯文本 `success`，与 JSON 契约不兼容，在 `server/internal/router` 中单独注册。
 
 ## 二、技术栈
 
@@ -43,7 +43,7 @@
 ## 三、目录结构
 
 ```
-├── api/openapi.yaml          # 唯一接口契约（52 路径 / 62 操作）
+├── api/openapi.yaml          # 唯一接口契约（53 路径 / 63 操作）
 ├── db/init.sql               # 建库建用户（wx_platform / wx_platform_test）
 ├── deploy/                   # 部署样例：docker-compose.yml、systemd 单元、nginx 反代
 ├── .github/workflows/        # CI：后端检查 / 前端检查 / 镜像构建发布（ghcr）
@@ -501,7 +501,7 @@ make e2e-mock     # 内置模拟微信服务端跑完整链路（无需真实凭
 
 # 契约规模与覆盖度核对
 grep -c "^  /" api/openapi.yaml                                  # 路径数（当前 53）
-grep -c "operationId:" api/openapi.yaml                          # 操作数（当前 66）
+grep -c "operationId:" api/openapi.yaml                          # 操作数（当前 63）
 grep -oP "operationId: \K\w+" api/openapi.yaml | tr 'A-Z' 'a-z' | sort -u > /tmp/ops.txt
 grep -hoP "^func \(\w+ \*Server\) \K\w+" server/internal/handler/*.go | tr 'A-Z' 'a-z' | sort -u > /tmp/impl.txt
 comm -23 /tmp/ops.txt /tmp/impl.txt        # 契约有、handler 没有 → 应为空
@@ -515,7 +515,7 @@ comm -23 /tmp/ops.txt /tmp/impl.txt        # 契约有、handler 没有 → 应�
 | 后端测试 | `go test -p 1 ./...`（带 `TEST_DB_DSN`，真连 MariaDB）11 个包全部 `ok`，含 wxauth 30 例、wxaudit 38 例、wxjob 32 例、wxapi、mockwx、repo、batch、wxcrypt |
 | 端到端 | `make e2e-mock` 通过：票据 → 授权 → 模板库 → 批量上传代码 → 批量提审 → 审核结果推送 → 批量发布 全链路断言 |
 | 前端 | `pnpm typecheck` 零错误；`vitest` 28 例通过；`pnpm build` 成功 |
-| 契约覆盖度 | 53 个路径 / 66 个 operationId，handler 双向差集为空 |
+| 契约覆盖度 | 53 个路径 / 63 个 operationId，handler 双向差集为空 |
 | 前端页面 | 13 个视图均有实现（无占位页） |
 | 实机冒烟 | 以 `MOCK_WX=1` 启动二进制后：`/healthz` 200、登录签发 JWT、`/platform/status` 正确给出回调地址与告警、运行参数局部更新生效、回调无签名/伪造签名均 400、`/audit-profiles` 返回种子默认配置 |
 

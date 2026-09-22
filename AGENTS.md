@@ -7,7 +7,7 @@
 
 | 目录 | 说明 |
 |---|---|
-| `api/openapi.yaml` | **唯一**接口契约（52 路径 / 62 operationId），前后端都从它生成 |
+| `api/openapi.yaml` | **唯一**接口契约（53 路径 / 63 operationId），前后端都从它生成 |
 | `server/` | Go + Gin + GORM 后端（`:8091`），作业引擎在进程内运行 |
 | `web/` | Vue 3 + TypeScript + Vite + Naive UI 前端（开发服务器 `:5174`） |
 | `db/init.sql` | 建库建用户（`wx_platform` / `wx_platform_test` / `wx_platform_e2e`） |
